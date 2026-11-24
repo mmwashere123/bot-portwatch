@@ -1,15 +1,17 @@
-# Usa a imagem oficial do Playwright que já contém o Chromium e dependências do sistema
+# Usa a imagem oficial do Playwright, que já contém o Chromium e as dependências do sistema
 FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
-# Define o diretório de trabalho
 WORKDIR /app
 
-# Copia os arquivos de dependências e instala
+# Copia e instala as dependências do Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia o restante do código do bot
+# Copia o código do bot
 COPY . .
+
+# Define a variável de ambiente para o Playwright encontrar o navegador
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Comando para iniciar o bot
 CMD ["python", "bot.py"]
