@@ -4,6 +4,8 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+import traceback
+import re
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -12,42 +14,37 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Variáveis para as mensagens fixas
 msg_progresso_geral = None
 msg_corrida = None
 
-import traceback # Adicione este import no topo do arquivo
-
 async def fetch_all_data():
-    """Extrai o progresso geral e a lista da corrida da página principal."""
-    print(">>> [DEBUG] Iniciando fetch_all_data...")
     dados = {'progresso_geral': None, 'corrida': []}
     try:
         async with async_playwright() as p:
-            print(">>> [DEBUG] Playwright iniciado. Abrindo navegador...")
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-            print(">>> [DEBUG] Navegador aberto com sucesso.")
-            
+            # Otimização: Roda sem interface gráfica e ignora restrições do container
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
             page = await browser.new_page()
-            print(">>> [DEBUG] Acessando o site...")
-            await page.goto('https://portwatch-vi.xyz/', wait_until='networkidle', timeout=30000)
-            print(">>> [DEBUG] Site carregado.")
             
-            # Extrair progresso geral
+            # Muda a espera para não travar caso o site tenha propagandas ou scripts infinitos
+            await page.goto('https://portwatch-vi.xyz/', wait_until='domcontentloaded', timeout=25000)
+            await page.wait_for_timeout(3000) # Dá 3 segundos extras para o JS rodar
+            
+            # 1. Progresso Geral
             try:
-                await page.wait_for_selector('#ov-title', timeout=10000)
+                await page.wait_for_selector('#ov-title', timeout=5000)
                 texto_titulo = await page.inner_text('#ov-title')
-                import re
                 match = re.search(r'(\d+)%', texto_titulo)
                 if match:
                     dados['progresso_geral'] = int(match.group(1))
-                    print(f">>> [DEBUG] Progresso geral encontrado: {dados['progresso_geral']}%")
             except Exception as e:
-                print(f">>> [ERRO] Falha ao extrair progresso geral: {e}")
+                print(f"Erro ao pegar progresso: {e}")
 
-            # Extrair corrida
+            # 2. Corrida
             try:
-                await page.wait_for_selector('#race-list', timeout=10000)
+                await page.wait_for_selector('#race-list', timeout=5000)
                 cards = await page.query_selector_all('#race-list li.effort')
                 for card in cards:
                     nome_elem = await card.query_selector('.e-title h3 a')
@@ -60,18 +57,17 @@ async def fetch_all_data():
                             'porcentagem': (await pct_elem.inner_text()).strip(),
                             'status': (await status_elem.inner_text()).strip() if status_elem else 'N/A'
                         })
-                print(f">>> [DEBUG] Corrida encontrada. Total de projetos: {len(dados['corrida'])}")
             except Exception as e:
-                print(f">>> [ERRO] Falha ao extrair corrida: {e}")
+                print(f"Erro ao pegar corrida: {e}")
 
             await browser.close()
-            print(">>> [DEBUG] Navegador fechado.")
     except Exception as e:
-        print(f">>> [ERRO FATAL] Erro no Playwright: {e}")
-        traceback.print_exc() # Isso vai imprimir o erro completo no log
+        print(f"ERRO FATAL PLAYWRIGHT: {e}")
+        traceback.print_exc()
+        # Isso vai jogar o erro no Discord para sabermos o que é
+        raise Exception(f"Falha no navegador: {str(e)}") 
     
     return dados
-# --- Funções para criar os Embeds ---
 
 def create_progress_embed(progresso):
     embed = discord.Embed(
@@ -85,100 +81,81 @@ def create_progress_embed(progresso):
 def create_race_embed(projetos):
     embed = discord.Embed(
         title="🏁 A Corrida do PortWatch VI",
-        description="Classificação atual dos projetos mais próximos de rodar GTA VI no PC.",
+        description="Classificação atual dos projetos.",
         color=discord.Color.purple()
     )
-    
     if not projetos:
-        embed.add_field(name="Nenhum projeto encontrado", value="Não foi possível extrair os dados da corrida.", inline=False)
+        embed.add_field(name="Nenhum projeto encontrado", value="Não foi possível extrair os dados.", inline=False)
         return embed
 
-    # Pega os 10 primeiros projetos
     for i, p in enumerate(projetos[:10], start=1):
         embed.add_field(
             name=f"{i}. {p['nome']}",
             value=f"**{p['porcentagem']}** — {p['status']}",
             inline=False
         )
-    
     embed.set_footer(text="Atualizado automaticamente a cada 30 minutos")
     return embed
-
-# --- Tarefas em Loop ---
 
 @tasks.loop(minutes=30)
 async def update_all():
     global msg_progresso_geral, msg_corrida
     if msg_progresso_geral is None and msg_corrida is None:
         return
-    
-    dados = await fetch_all_data()
-    
-    # Atualiza o progresso geral, se a mensagem existir
-    if msg_progresso_geral is not None and dados['progresso_geral'] is not None:
-        embed = create_progress_embed(dados['progresso_geral'])
-        try:
-            await msg_progresso_geral.edit(embed=embed)
-        except discord.NotFound:
-            msg_progresso_geral = None
-
-    # Atualiza a corrida, se a mensagem existir
-    if msg_corrida is not None and dados['corrida']:
-        embed = create_race_embed(dados['corrida'])
-        try:
-            await msg_corrida.edit(embed=embed)
-        except discord.NotFound:
-            msg_corrida = None
-
-@update_all.before_loop
-async def before_update():
-    await bot.wait_until_ready()
-
-# --- Comandos ---
+    try:
+        dados = await fetch_all_data()
+        if msg_progresso_geral is not None and dados['progresso_geral'] is not None:
+            await msg_progresso_geral.edit(embed=create_progress_embed(dados['progresso_geral']))
+        if msg_corrida is not None and dados['corrida']:
+            await msg_corrida.edit(embed=create_race_embed(dados['corrida']))
+    except Exception:
+        pass # Ignora erros no loop de fundo para não derrubar o bot
 
 @bot.command(name='start_monitor')
 async def start_monitor(ctx):
-    """Inicia o monitor do progresso geral."""
     global msg_progresso_geral
     if msg_progresso_geral is not None:
         await ctx.send("⚠️ O monitor de progresso geral já está ativo.")
         return
 
-    await ctx.send("🔎 Buscando progresso geral, aguarde...")
-    dados = await fetch_all_data()
-    if dados['progresso_geral'] is None:
-        await ctx.send("❌ Não foi possível obter o progresso geral.")
-        return
+    msg_espera = await ctx.send("🔎 Buscando progresso geral, aguarde (isso pode levar até 30 segundos)...")
+    try:
+        dados = await fetch_all_data() # Se der erro, cai no except abaixo
+        if dados['progresso_geral'] is None:
+            await msg_espera.edit(content="❌ O navegador abriu, mas não achou o número na página. O site pode ter bloqueado o bot.")
+            return
 
-    embed = create_progress_embed(dados['progresso_geral'])
-    msg_progresso_geral = await ctx.send(embed=embed)
-    if not update_all.is_running():
-        update_all.start()
-    await ctx.send("✅ Monitor de progresso geral iniciado!", delete_after=5)
+        msg_progresso_geral = await ctx.send(embed=create_progress_embed(dados['progresso_geral']))
+        await msg_espera.delete()
+        if not update_all.is_running():
+            update_all.start()
+    except Exception as e:
+        # AQUI ELE VAI MOSTRAR O ERRO REAL
+        await msg_espera.edit(content=f"❌ **Erro no Playwright:** `{e}`\nVerifique os logs do Railway (Deploy Logs).")
 
 @bot.command(name='start_race')
 async def start_race(ctx):
-    """Inicia o monitor da corrida."""
     global msg_corrida
     if msg_corrida is not None:
         await ctx.send("⚠️ O monitor da corrida já está ativo.")
         return
 
-    await ctx.send("🔎 Buscando dados da corrida, aguarde...")
-    dados = await fetch_all_data()
-    if not dados['corrida']:
-        await ctx.send("❌ Não foi possível obter os dados da corrida.")
-        return
+    msg_espera = await ctx.send("🔎 Buscando dados da corrida, aguarde...")
+    try:
+        dados = await fetch_all_data()
+        if not dados['corrida']:
+            await msg_espera.edit(content="❌ O navegador abriu, mas não achou a lista da corrida. O layout do site mudou ou o bot foi bloqueado.")
+            return
 
-    embed = create_race_embed(dados['corrida'])
-    msg_corrida = await ctx.send(embed=embed)
-    if not update_all.is_running():
-        update_all.start()
-    await ctx.send("✅ Monitor da corrida iniciado!", delete_after=5)
+        msg_corrida = await ctx.send(embed=create_race_embed(dados['corrida']))
+        await msg_espera.delete()
+        if not update_all.is_running():
+            update_all.start()
+    except Exception as e:
+        await msg_espera.edit(content=f"❌ **Erro no Playwright:** `{e}`\nVerifique os logs do Railway (Deploy Logs).")
 
 @bot.command(name='stop_all')
 async def stop_all(ctx):
-    """Para todos os monitores."""
     global msg_progresso_geral, msg_corrida
     if update_all.is_running():
         update_all.stop()
@@ -192,6 +169,6 @@ async def on_ready():
 
 if __name__ == '__main__':
     if not TOKEN:
-        print("ERRO: Token do Discord não encontrado. Verifique o arquivo .env")
+        print("ERRO: Token do Discord não encontrado.")
     else:
         bot.run(TOKEN)
