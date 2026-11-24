@@ -16,62 +16,61 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 msg_progresso_geral = None
 msg_corrida = None
 
+import traceback # Adicione este import no topo do arquivo
+
 async def fetch_all_data():
     """Extrai o progresso geral e a lista da corrida da página principal."""
+    print(">>> [DEBUG] Iniciando fetch_all_data...")
     dados = {'progresso_geral': None, 'corrida': []}
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            # A página principal já contém a seção #race
-            await page.goto('https://portwatch-vi.xyz/', wait_until='networkidle', timeout=30000)
+            print(">>> [DEBUG] Playwright iniciado. Abrindo navegador...")
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            print(">>> [DEBUG] Navegador aberto com sucesso.")
             
-            # 1. Extrair o progresso geral (o texto "Overall progress · closest effort to playable X%")
+            page = await browser.new_page()
+            print(">>> [DEBUG] Acessando o site...")
+            await page.goto('https://portwatch-vi.xyz/', wait_until='networkidle', timeout=30000)
+            print(">>> [DEBUG] Site carregado.")
+            
+            # Extrair progresso geral
             try:
-                # Espera o elemento do título aparecer
                 await page.wait_for_selector('#ov-title', timeout=10000)
                 texto_titulo = await page.inner_text('#ov-title')
-                # Extrai o número antes do '%'
                 import re
                 match = re.search(r'(\d+)%', texto_titulo)
                 if match:
                     dados['progresso_geral'] = int(match.group(1))
+                    print(f">>> [DEBUG] Progresso geral encontrado: {dados['progresso_geral']}%")
             except Exception as e:
-                print(f"Erro ao extrair progresso geral: {e}")
+                print(f">>> [ERRO] Falha ao extrair progresso geral: {e}")
 
-            # 2. Extrair a lista da corrida
+            # Extrair corrida
             try:
                 await page.wait_for_selector('#race-list', timeout=10000)
-                # Cada projeto é um <li> com a classe "effort"
                 cards = await page.query_selector_all('#race-list li.effort')
-                
                 for card in cards:
-                    # Nome do projeto
                     nome_elem = await card.query_selector('.e-title h3 a')
-                    nome = await nome_elem.inner_text() if nome_elem else 'Desconhecido'
-                    
-                    # Porcentagem
                     pct_elem = await card.query_selector('.e-score b')
-                    porcentagem = await pct_elem.inner_text() if pct_elem else 'N/A'
-                    
-                    # Status (milestone)
                     status_elem = await card.query_selector('.e-score small')
-                    status = await status_elem.inner_text() if status_elem else 'N/A'
                     
-                    if nome != 'Desconhecido' and porcentagem != 'N/A':
+                    if nome_elem and pct_elem:
                         dados['corrida'].append({
-                            'nome': nome.strip(),
-                            'porcentagem': porcentagem.strip(),
-                            'status': status.strip()
+                            'nome': (await nome_elem.inner_text()).strip(),
+                            'porcentagem': (await pct_elem.inner_text()).strip(),
+                            'status': (await status_elem.inner_text()).strip() if status_elem else 'N/A'
                         })
+                print(f">>> [DEBUG] Corrida encontrada. Total de projetos: {len(dados['corrida'])}")
             except Exception as e:
-                print(f"Erro ao extrair corrida: {e}")
+                print(f">>> [ERRO] Falha ao extrair corrida: {e}")
 
             await browser.close()
+            print(">>> [DEBUG] Navegador fechado.")
     except Exception as e:
-        print(f"Erro geral no fetch_all_data: {e}")
+        print(f">>> [ERRO FATAL] Erro no Playwright: {e}")
+        traceback.print_exc() # Isso vai imprimir o erro completo no log
+    
     return dados
-
 # --- Funções para criar os Embeds ---
 
 def create_progress_embed(progresso):
