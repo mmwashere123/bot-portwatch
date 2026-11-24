@@ -1,6 +1,7 @@
 # Usa a imagem oficial do Playwright, que já contém o Chromium e as dependências do sistema
 FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
+# Define o diretório de trabalho
 WORKDIR /app
 
 # Copia e instala as dependências do Python
